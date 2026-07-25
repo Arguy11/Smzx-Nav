@@ -247,7 +247,18 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
             font-family: 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;
             font-size: 11px;
             color: #606266;
-            cursor: default;
+            cursor: pointer;
+            user-select: none;
+            transition: opacity 0.2s;
+        }
+        
+        .custom-legend-item:hover {
+            opacity: 0.7;
+        }
+        
+        .custom-legend-item.hidden {
+            opacity: 0.35;
+            text-decoration: line-through;
         }
         
         .custom-legend-color {
@@ -861,6 +872,8 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
         let currentChart = null;
         let currentDrawdownChart = null;
         let productColorMap = {}; // 产品名称 → 颜色映射，保证回撤图与业绩图颜色一致
+        let nextColorIndex = 0;   // 顺序分配颜色索引，避免同策略组内颜色重复
+        let hiddenLegendProducts = new Set(); // 图例中已隐藏的产品
         let flatpickrInstance = null;
         let sliderStart = null;
         let sliderEnd = null;
@@ -1189,6 +1202,7 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
                 currentStrategy = this.value;
                 tableSortColumn = null; // 切换策略时重置排序
                 tableSortAsc = true;
+                hiddenLegendProducts.clear(); // 切换策略时重置图例隐藏状态
                 document.querySelectorAll('.quick-date-btn').forEach(function(btn) {
                     btn.classList.remove('active'); // 重置快速日期按钮状态
                 });
@@ -1410,6 +1424,9 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
         
         // 绘制图表
         function drawChart() {
+            // 每次重绘时重置颜色映射，确保顺序轮转无重复
+            resetColorMap();
+            
             const strategyData = excelData[currentStrategy];
             const selectedProducts = getSelectedProducts();
             const dateRange = getSelectedDateRange();
@@ -1619,7 +1636,7 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
             // 生成缓存键，基于策略、选中的产品、日期范围和是否显示超额曲线
             const cacheKey = JSON.stringify({
                 strategy: currentStrategy,
-                products: selectedProducts.sort(),
+                products: [...selectedProducts].sort(),
                 dateRange: dateRange,
                 showExcess: showExcessCurve
             });
@@ -2100,7 +2117,7 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
             tbody.innerHTML = bodyHtml;
         }
         
-        // 渲染自定义图例（净值图和回撤图共用）
+        // 渲染自定义图例（净值图和回撤图共用，支持点击隐藏/显示）
         function renderCustomLegend(datasets) {
             const legendContainer = document.getElementById('custom-legend');
             if (!legendContainer) return;
@@ -2112,35 +2129,111 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
             }
             
             legendContainer.style.display = 'flex';
-            let html = '';
+            legendContainer.innerHTML = '';
+            
             for (const ds of datasets) {
-                html += `<div class="custom-legend-item">
-                    <span class="custom-legend-color" style="background-color:${ds.borderColor}"></span>
-                    <span>${ds.label}</span>
-                </div>`;
+                const productName = ds.label;
+                const isHidden = hiddenLegendProducts.has(productName);
+                
+                const item = document.createElement('div');
+                item.className = 'custom-legend-item' + (isHidden ? ' hidden' : '');
+                item.setAttribute('data-product', productName);
+                
+                const colorSpan = document.createElement('span');
+                colorSpan.className = 'custom-legend-color';
+                colorSpan.style.backgroundColor = ds.borderColor;
+                
+                const labelSpan = document.createElement('span');
+                labelSpan.textContent = productName;
+                
+                item.appendChild(colorSpan);
+                item.appendChild(labelSpan);
+                
+                // 点击图例项：同步切换净值图和回撤图中对应产品的可见性
+                item.addEventListener('click', function() {
+                    if (hiddenLegendProducts.has(productName)) {
+                        hiddenLegendProducts.delete(productName);
+                    } else {
+                        hiddenLegendProducts.add(productName);
+                    }
+                    const visible = !hiddenLegendProducts.has(productName);
+                    
+                    // 切换净值曲线图中对应数据集的可见性
+                    if (currentChart) {
+                        currentChart.data.datasets.forEach(function(chartDs, idx) {
+                            if (chartDs.label === productName) {
+                                currentChart.setDatasetVisibility(idx, visible);
+                            }
+                        });
+                        currentChart.update();
+                    }
+                    
+                    // 切换回撤图中对应数据集的可见性
+                    if (currentDrawdownChart) {
+                        currentDrawdownChart.data.datasets.forEach(function(ddDs, idx) {
+                            if (ddDs.label === productName) {
+                                currentDrawdownChart.setDatasetVisibility(idx, visible);
+                            }
+                        });
+                        currentDrawdownChart.update();
+                    }
+                    
+                    // 更新图例项的视觉状态
+                    if (visible) {
+                        item.classList.remove('hidden');
+                    } else {
+                        item.classList.add('hidden');
+                    }
+                });
+                
+                legendContainer.appendChild(item);
             }
-            legendContainer.innerHTML = html;
+            
+            // 将隐藏状态同步到两个图表的数据集可见性
+            applyHiddenState();
         }
         
-        // 获取产品对应的颜色（基于名称哈希，保证同一产品颜色始终一致）
+        // 将 hiddenLegendProducts 的状态应用到两个图表
+        function applyHiddenState() {
+            hiddenLegendProducts.forEach(function(productName) {
+                if (currentChart) {
+                    currentChart.data.datasets.forEach(function(ds, idx) {
+                        if (ds.label === productName) {
+                            currentChart.setDatasetVisibility(idx, false);
+                        }
+                    });
+                    currentChart.update();
+                }
+                if (currentDrawdownChart) {
+                    currentDrawdownChart.data.datasets.forEach(function(ds, idx) {
+                        if (ds.label === productName) {
+                            currentDrawdownChart.setDatasetVisibility(idx, false);
+                        }
+                    });
+                    currentDrawdownChart.update();
+                }
+            });
+        }
+        
+        // 获取产品对应的颜色（顺序轮转分配，避免同策略组内颜色重复）
+        const ALL_COLORS = [
+            '#FF6384', '#36A2EB', '#FFCE56', '#9966FF', '#FF9F40',
+            '#EA4335', '#4285F4', '#FBBC05', '#FF6D01', '#46BDC6',
+            '#7B1FA2', '#C2185B', '#1976D2', '#E64A19', '#5C6BC0',
+            '#0097A7', '#F4511E', '#8E24AA', '#1E88E5', '#F57C00'
+        ];
+        
+        function resetColorMap() {
+            productColorMap = {};
+            nextColorIndex = 0;
+        }
+        
         function getProductColor(productName) {
             if (productColorMap[productName]) {
                 return productColorMap[productName];
             }
-            // 基于产品名称生成稳定的颜色索引
-            const colors = [
-                '#FF6384', '#36A2EB', '#FFCE56', '#4BC0C0', '#9966FF',
-                '#FF9F40', '#8AC249', '#EA4335', '#4285F4', '#FBBC05',
-                '#34A853', '#FF6D01', '#46BDC6', '#7B1FA2', '#C2185B',
-                '#1976D2', '#00897B', '#E64A19', '#5C6BC0', '#0097A7'
-            ];
-            let hash = 0;
-            for (let i = 0; i < productName.length; i++) {
-                hash = ((hash << 5) - hash) + productName.charCodeAt(i);
-                hash |= 0; // 转为32位整数
-            }
-            const colorIndex = Math.abs(hash) % colors.length;
-            const color = colors[colorIndex];
+            const color = ALL_COLORS[nextColorIndex % ALL_COLORS.length];
+            nextColorIndex++;
             productColorMap[productName] = color;
             return color;
         }
@@ -2284,8 +2377,8 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
             
             const ctx = document.getElementById('drawdown-chart').getContext('2d');
             const chartTitle = showExcessCurve
-                ? `${currentStrategy} 策略产品超额回撤曲线`
-                : `${currentStrategy} 策略产品回撤曲线`;
+                ? `${currentStrategy} 策略产品超额动态回撤`
+                : `${currentStrategy} 策略产品动态回撤`;
             
             currentDrawdownChart = new Chart(ctx, {
                 type: 'line',
@@ -2382,7 +2475,7 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
                                 size: 12
                             },
                             itemSort: function(a, b) {
-                                return a.parsed.y - b.parsed.y; // 回撤从小到大排列
+                                return b.parsed.y - a.parsed.y; // 回撤由大到小排列（即回撤最小到最大）
                             },
                             callbacks: {
                                 label: function(context) {
